@@ -51,7 +51,7 @@ export const WalletCard: React.FC<WalletCardProps> = ({
   return (
     <div className="glass-panel" style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "16px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid rgba(255,255,255,0.06)", paddingBottom: "10px" }}>
-        <h3 style={{ fontSize: "16px", fontWeight: "600", color: "#f8fafc", display: "flex", alignItems: "center", gap: "8px" }}>
+        <h3 style={{ fontSize: "16px", fontWeight: "600", color: "var(--text-primary)", display: "flex", alignItems: "center", gap: "8px" }}>
           <Wallet size={18} style={{ color: "var(--color-primary)" }} /> Mock Wallet Hub
         </h3>
         <span style={{ fontSize: "11px", backgroundColor: "rgba(0, 230, 118, 0.1)", color: "var(--color-bullish)", padding: "2px 6px", borderRadius: "4px", fontWeight: "600" }}>
@@ -60,9 +60,9 @@ export const WalletCard: React.FC<WalletCardProps> = ({
       </div>
 
       {/* Balance Indicator */}
-      <div style={{ padding: "16px", background: "linear-gradient(135deg, rgba(13, 17, 39, 0.8) 0%, rgba(7, 9, 19, 0.9) 100%)", borderRadius: "12px", border: "1px solid rgba(255, 255, 255, 0.04)" }}>
+      <div style={{ padding: "16px", background: "linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%)", borderRadius: "12px", border: "1px solid rgba(255, 255, 255, 0.04)" }}>
         <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Total Net Equity</span>
-        <div className="crypto-font" style={{ fontSize: "32px", fontWeight: "800", color: "#f8fafc", marginTop: "4px", letterSpacing: "-0.5px" }}>
+        <div className="crypto-font" style={{ fontSize: "32px", fontWeight: "800", color: "var(--text-primary)", marginTop: "4px", letterSpacing: "-0.5px" }}>
           ${balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
         </div>
       </div>
@@ -85,8 +85,8 @@ export const WalletCard: React.FC<WalletCardProps> = ({
               padding: "10px",
               borderRadius: "8px",
               border: "1px solid rgba(255, 255, 255, 0.08)",
-              backgroundColor: "rgba(255,255,255,0.02)",
-              color: "#f8fafc",
+              backgroundColor: "rgba(255,255,255,0.03)",
+              color: "var(--text-primary)",
               fontSize: "13px",
               fontWeight: "600",
               cursor: "pointer",
@@ -101,7 +101,7 @@ export const WalletCard: React.FC<WalletCardProps> = ({
           </button>
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: "10px", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-glass)", backgroundColor: "rgba(7,9,19,0.3)" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px", padding: "12px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.08)", backgroundColor: "rgba(255,255,255,0.03)" }}>
           <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
             Enter {mode === "DEPOSIT" ? "deposit" : "withdrawal"} amount ($)
           </span>
@@ -115,8 +115,8 @@ export const WalletCard: React.FC<WalletCardProps> = ({
                 padding: "8px 12px",
                 borderRadius: "6px",
                 border: "1px solid rgba(255, 255, 255, 0.1)",
-                backgroundColor: "#070913",
-                color: "#f8fafc",
+                backgroundColor: "rgba(0,0,0,0.4)",
+                color: "var(--text-primary)",
                 fontFamily: "var(--font-mono)",
                 fontSize: "14px",
                 outline: "none"
@@ -166,8 +166,8 @@ export const WalletCard: React.FC<WalletCardProps> = ({
                     alignItems: "center",
                     padding: "8px 10px",
                     borderRadius: "6px",
-                    backgroundColor: "rgba(255,255,255,0.01)",
-                    border: "1px solid rgba(255,255,255,0.03)"
+                    backgroundColor: "rgba(255,255,255,0.02)",
+                    border: "1px solid rgba(255,255,255,0.05)"
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -181,7 +181,7 @@ export const WalletCard: React.FC<WalletCardProps> = ({
                       </div>
                     )}
                     <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-                      <span style={{ fontSize: "12px", fontWeight: "600", color: "#f8fafc" }}>{tx.description}</span>
+                      <span style={{ fontSize: "12px", fontWeight: "600", color: "var(--text-primary)" }}>{tx.description}</span>
                       <span style={{ fontSize: "9px", color: "var(--text-muted)" }}>{tx.timestamp}</span>
                     </div>
                   </div>

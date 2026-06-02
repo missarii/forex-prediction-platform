@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  ArrowRight,
   Activity,
   History,
   LogOut,
@@ -65,8 +64,11 @@ export default function App() {
 
   // WebSocket Price Feed states
   const [prices, setPrices] = useState<{ [key: string]: number }>(BASE_PRICES);
+  // Stable ref so fallback simulator always reads the latest price without causing re-mounts
+  const pricesRef = useRef<{ [key: string]: number }>(BASE_PRICES);
   const [tickChanges, setTickChanges] = useState<{ [key: string]: "up" | "down" | null }>({});
   const [activeSymbol, setActiveSymbol] = useState<string>("BTC/USD");
+  const activeSymbolRef = useRef<string>("BTC/USD");
 
   // Candlestick history for selected asset
   const [candles, setCandles] = useState<Candlestick[]>([]);
@@ -170,11 +172,12 @@ export default function App() {
   }, [user, userId]);
 
   // 1. Establish Price feed (via backend WebSocket, with client-side fallback)
+  // IMPORTANT: no state in deps array — avoids restarting the socket on every tick
   useEffect(() => {
-    // Attempt WebSocket connection to Spring Boot Price Service
     const wsUrl = `ws://${window.location.hostname}:8080/ws/prices`;
     const ws = new WebSocket(wsUrl);
     priceSocketRef.current = ws;
+    let fallbackInterval: ReturnType<typeof setInterval> | null = null;
 
     ws.onopen = () => {
       console.log("WebSocket connected to backend Price broker");
@@ -184,7 +187,6 @@ export default function App() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        // Backend yields: { symbol: "BTC/USD", price: 68420.5, timestamp: 1717290000 }
         if (data.symbol && data.price) {
           updatePrice(data.symbol, data.price);
         }
@@ -198,97 +200,93 @@ export default function App() {
     };
 
     ws.onclose = () => {
-      // Local backup price ticker loop
-      const fallbackInterval = setInterval(() => {
-        SYMBOLS.forEach((symbol) => {
-          const currentVal = prices[symbol];
-          const volatility = symbol.includes("USD") ? 0.0003 : symbol.includes("JPY") ? 0.05 : 2.5;
-          const drift = (Math.random() - 0.495) * volatility; // slight upward drift for fun
-          const nextPrice = currentVal + drift;
-          updatePrice(symbol, nextPrice);
+      // Fallback: simulate price ticks using the stable pricesRef (no stale closure)
+      fallbackInterval = setInterval(() => {
+        SYMBOLS.forEach((sym) => {
+          const cur = pricesRef.current[sym];
+          // Per-symbol realistic volatility
+          let volatility: number;
+          if (sym === "BTC/USD") volatility = cur * 0.0004;
+          else if (sym === "ETH/USD") volatility = cur * 0.0004;
+          else if (sym === "XAU/USD") volatility = cur * 0.0002;
+          else if (sym === "USD/JPY") volatility = 0.06;
+          else volatility = 0.0003; // EUR/USD, GBP/USD
+          const drift = (Math.random() - 0.495) * volatility;
+          updatePrice(sym, cur + drift);
         });
       }, 1000);
-
-      return () => clearInterval(fallbackInterval);
     };
 
     return () => {
-      if (ws) ws.close();
+      if (fallbackInterval) clearInterval(fallbackInterval);
+      ws.close();
     };
-  }, [prices]);
+  }, []); // run once — stable because we read from refs
 
-  // Update a specific asset's price and compute its tick flash
-  const updatePrice = (symbol: string, val: number) => {
-    const prev = prices[symbol];
-    if (prev === val) return;
+  // Update a specific asset's price — reads from ref to avoid stale closures
+  const updatePrice = (sym: string, val: number) => {
+    const prev = pricesRef.current[sym] ?? val;
+    if (Math.abs(prev - val) < 1e-10) return;
 
-    setPrices((prevMap) => ({ ...prevMap, [symbol]: val }));
+    // Keep ref in sync (instant, no re-render cost)
+    pricesRef.current = { ...pricesRef.current, [sym]: val };
 
-    // Flash green (up) or red (down)
+    // Trigger React state update for UI
+    setPrices((p) => ({ ...p, [sym]: val }));
+
+    // Tick direction flash
     const direction = val > prev ? "up" : "down";
-    setTickChanges((prevTicks) => ({ ...prevTicks, [symbol]: direction }));
-    setTimeout(() => {
-      setTickChanges((prevTicks) => ({ ...prevTicks, [symbol]: null }));
-    }, 800);
+    setTickChanges((t) => ({ ...t, [sym]: direction }));
+    setTimeout(() => setTickChanges((t) => ({ ...t, [sym]: null })), 600);
 
-    // Update OHLC historical candles
+    // ── Candle OHLC logic ──────────────────────────────────────────
     const now = Math.floor(Date.now() / 1000);
-    const existingCandles = candleHistoryRef.current[symbol] || [];
+    const existing = candleHistoryRef.current[sym] || [];
 
-    if (existingCandles.length === 0) {
-      // Create initial back history of candles
-      const newHistory: Candlestick[] = [];
-      let baseVal = val;
-      for (let i = 24; i >= 0; i--) {
-        const change = (Math.random() - 0.5) * (val * 0.005);
-        const candleOpen = baseVal - change;
-        const candleClose = baseVal;
-        const candleHigh = Math.max(candleOpen, candleClose) + Math.random() * (val * 0.002);
-        const candleLow = Math.min(candleOpen, candleClose) - Math.random() * (val * 0.002);
-        
-        newHistory.push({
-          time: now - i * 5,
-          open: candleOpen,
-          high: candleHigh,
-          low: candleLow,
-          close: candleClose,
-        });
-        baseVal = candleOpen;
+    if (existing.length === 0) {
+      // Seed with 30 back-filled candles proportional to asset price
+      const seed: Candlestick[] = [];
+      let base = val;
+      const tickSize = val * 0.002; // 0.2% per historical candle
+      for (let i = 30; i >= 0; i--) {
+        const open = base + (Math.random() - 0.5) * tickSize;
+        const close = base;
+        const high = Math.max(open, close) + Math.random() * tickSize * 0.5;
+        const low = Math.min(open, close) - Math.random() * tickSize * 0.5;
+        seed.push({ time: now - i * 5, open, high, low, close });
+        base = open;
       }
-      candleHistoryRef.current[symbol] = newHistory.reverse();
+      candleHistoryRef.current[sym] = seed;
     } else {
-      const lastCandle = existingCandles[existingCandles.length - 1];
-      const candleAge = now - lastCandle.time;
-
-      if (candleAge < 5) {
-        // Update existing live candle
-        lastCandle.close = val;
-        lastCandle.high = Math.max(lastCandle.high, val);
-        lastCandle.low = Math.min(lastCandle.low, val);
+      const last = existing[existing.length - 1];
+      const age = now - last.time;
+      if (age < 5) {
+        // Still in the same 5-second candle — just update it
+        last.close = val;
+        last.high = Math.max(last.high, val);
+        last.low = Math.min(last.low, val);
       } else {
-        // Spawn a new candle
-        const newCandle: Candlestick = {
+        // New candle
+        existing.push({
           time: now,
-          open: lastCandle.close,
-          high: Math.max(lastCandle.close, val),
-          low: Math.min(lastCandle.close, val),
+          open: last.close,
+          high: Math.max(last.close, val),
+          low: Math.min(last.close, val),
           close: val,
-        };
-        existingCandles.push(newCandle);
-        // Cap list size
-        if (existingCandles.length > 30) {
-          existingCandles.shift();
-        }
+        });
+        if (existing.length > 60) existing.shift();
       }
     }
 
-    if (symbol === activeSymbol) {
-      setCandles([...(candleHistoryRef.current[symbol] || [])]);
+    // Only push a new array ref when this is the active chart
+    if (sym === activeSymbolRef.current) {
+      setCandles([...(candleHistoryRef.current[sym] || [])]);
     }
   };
 
-  // Sync active chart candles when selected symbol changes
+  // Sync active chart candles AND ref when selected symbol changes
   useEffect(() => {
+    activeSymbolRef.current = activeSymbol;
     setCandles([...(candleHistoryRef.current[activeSymbol] || [])]);
   }, [activeSymbol]);
 
@@ -320,7 +318,7 @@ export default function App() {
   const resolvePrediction = (bet: ActivePrediction) => {
     const exitPrice = prices[bet.symbol];
     const entryPrice = bet.entryPrice;
-    
+
     let isWin = false;
     if (bet.direction === "UP") {
       isWin = exitPrice > entryPrice;
@@ -333,7 +331,7 @@ export default function App() {
 
     // Adjust balance and logs locally
     setBalance((prev) => prev + payout);
-    
+
     // Add transaction logs
     const newTx: Transaction = {
       id: `tx-res-${bet.id}`,
@@ -430,7 +428,7 @@ export default function App() {
   // 3. Place Prediction
   const handlePlaceBet = (direction: "UP" | "DOWN", amount: number, durationSeconds: number) => {
     setIsSubmitting(true);
-    
+
     if (userId) {
       fetch("/api/bets/place", {
         method: "POST",
@@ -782,7 +780,7 @@ export default function App() {
             <div
               key={sym}
               onClick={() => setActiveSymbol(sym)}
-              className={`glass-panel ${isActive ? "glow-cyan" : ""} ${change === "up" ? "flash-up" : change === "down" ? "flash-down" : ""}`}
+              className={`glass-panel ${isActive ? "glow-cyan" : ""}`}
               style={{
                 flex: "0 0 170px",
                 padding: "8px 12px",
@@ -819,8 +817,8 @@ export default function App() {
 
       {/* Main Grid content */}
       <main className="main-content">
-        {/* Left Side: Candlestick, active bets, settlement history */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+        {/* Left Side: Candlestick, active bets, settlement history + feature panels */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "20px", minWidth: 0, overflow: "hidden" }}>
           {/* Chart Wrapper */}
           <div className="glass-panel" style={{ padding: "20px" }}>
             <div
@@ -839,11 +837,14 @@ export default function App() {
               </div>
               <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
                 <span className="crypto-font" style={{ fontSize: "22px", fontWeight: "800", color: "#f8fafc" }}>
-                  {prices[activeSymbol].toFixed(activeSymbol.includes("USD") ? 5 : 2)}
+                  {prices[activeSymbol].toFixed(
+                    activeSymbol.includes("BTC") || activeSymbol.includes("ETH") || activeSymbol.includes("XAU") ? 2
+                    : activeSymbol.includes("JPY") ? 3 : 5
+                  )}
                 </span>
               </div>
             </div>
-            
+
             <CandlestickChart
               candles={candles}
               currentPrice={prices[activeSymbol]}
@@ -865,7 +866,7 @@ export default function App() {
             >
               Ongoing Positions ({predictions.length})
             </h3>
-            
+
             {predictions.length === 0 ? (
               <div style={{ padding: "30px 0", textAlign: "center", fontSize: "13px", color: "var(--text-muted)" }}>
                 No active predictions. Submit your forecast in the panel to trade!
@@ -1014,9 +1015,26 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {/* Additional Features — vertical stack within left column */}
+          <WalletCard
+            balance={balance}
+            transactions={transactions}
+            onDeposit={handleDeposit}
+            onWithdraw={handleWithdraw}
+            isSubmitting={isSubmitting}
+          />
+          <AiAssistant symbol={activeSymbol} currentPrice={prices[activeSymbol]} />
+          <CopyTrading
+            traders={masterTraders}
+            activeCopies={activeCopies}
+            onToggleCopy={handleToggleCopy}
+          />
+          <Leaderboard traders={leaderboard} />
+          <ClickHouseAnalytics data={analytics} />
         </div>
 
-        {/* Right Side: Betting Panel, Wallet, Copy Trading, AI signals, ClickHouse metrics */}
+        {/* Right Side: Betting Panel */}
         <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
           {/* Betting Action Panel */}
           <BettingPanel
@@ -1026,31 +1044,6 @@ export default function App() {
             onPlaceBet={handlePlaceBet}
             isSubmitting={isSubmitting}
           />
-
-          {/* Wallet management */}
-          <WalletCard
-            balance={balance}
-            transactions={transactions}
-            onDeposit={handleDeposit}
-            onWithdraw={handleWithdraw}
-            isSubmitting={isSubmitting}
-          />
-
-          {/* AI Helper */}
-          <AiAssistant symbol={activeSymbol} currentPrice={prices[activeSymbol]} />
-
-          {/* Copy trading */}
-          <CopyTrading
-            traders={masterTraders}
-            activeCopies={activeCopies}
-            onToggleCopy={handleToggleCopy}
-          />
-
-          {/* Hall of fame leaderboard */}
-          <Leaderboard traders={leaderboard} />
-
-          {/* ClickHouse Analytics logs */}
-          <ClickHouseAnalytics data={analytics} />
         </div>
       </main>
 
@@ -1065,7 +1058,7 @@ export default function App() {
           marginTop: "40px",
         }}
       >
-        © 2026 Antigravity Forex Prediction Market Engine. Built for Java & React Showcase Platform.
+        © 2026 BINGO ForexDEFI PREDICTION MARKET
       </footer>
 
       {/* Floating alert/notification banner */}
@@ -1103,91 +1096,144 @@ export default function App() {
             left: 0,
             width: "100%",
             height: "100%",
-            backgroundColor: "rgba(7, 9, 19, 0.88)",
-            backdropFilter: "blur(8px)",
-            WebkitBackdropFilter: "blur(8px)",
+            backgroundColor: "#0a0a0a",
             display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
             zIndex: 99999,
             pointerEvents: "all",
           }}
         >
-          <form
-            onSubmit={handleLoginSubmit}
-            className="glass-panel"
-            style={{
-              padding: "40px",
-              width: "420px",
-              display: "flex",
-              flexDirection: "column",
-              gap: "24px",
-              border: "1px solid rgba(0, 242, 254, 0.3)",
-              boxShadow: "0 0 40px rgba(0, 242, 254, 0.12), 0 20px 60px rgba(0,0,0,0.6)",
-              pointerEvents: "all",
-              position: "relative",
-              zIndex: 100000,
-            }}
-          >
-            {/* Logo mark */}
-            <div style={{ textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: "12px" }}>
-              <div style={{
-                width: "52px", height: "52px", borderRadius: "14px",
-                background: "linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                boxShadow: "var(--shadow-neon-primary)",
-              }}>
-                <Activity size={24} style={{ color: "#070913" }} />
+          {/* Left Side (Image & Copy) */}
+          <div style={{
+            flex: 1,
+            backgroundImage: "url('/bg-login.png')",
+            backgroundSize: "cover",
+            backgroundPosition: "center",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "center",
+            padding: "80px",
+            position: "relative",
+          }}>
+            <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.6)" }} />
+            <div style={{ position: "relative", zIndex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "60px" }}>
+                <Activity size={32} style={{ color: "var(--color-primary)" }} />
+                <span style={{ fontSize: "24px", fontWeight: "800", color: "#fff", letterSpacing: "1px" }}>BINGO FOREX</span>
               </div>
-              <div>
-                <h2 style={{ fontSize: "22px", fontWeight: "800", color: "#f8fafc", letterSpacing: "0.5px" }}>Welcome to BINGO Forex</h2>
-                <p style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "6px" }}>
-                  Enter a trader name to enter the DeFi simulation market
+
+              <h1 style={{ fontSize: "56px", fontWeight: "800", color: "#fff", lineHeight: "1.1", marginBottom: "24px" }}>
+                Trade Smarter, Grow Faster
+              </h1>
+              <p style={{ fontSize: "22px", color: "rgba(255,255,255,0.8)", maxWidth: "460px", lineHeight: "1.4" }}>
+                Turn every market opportunity into a winning move.
+              </p>
+
+              <div style={{ display: "flex", gap: "16px", marginTop: "80px" }}>
+                <div style={{ width: "40px", height: "40px", borderRadius: "50%", border: "1px solid rgba(255,255,255,0.3)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>f</div>
+                <div style={{ width: "40px", height: "40px", borderRadius: "50%", border: "1px solid rgba(255,255,255,0.3)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>G</div>
+                <div style={{ width: "40px", height: "40px", borderRadius: "50%", border: "1px solid rgba(255,255,255,0.3)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>in</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Side (Form) */}
+          <div style={{
+            flex: 1,
+            backgroundColor: "#111111",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}>
+            <form
+              onSubmit={handleLoginSubmit}
+              style={{
+                width: "400px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "24px",
+              }}
+            >
+              <div style={{ textAlign: "center", marginBottom: "20px" }}>
+                <h2 style={{ fontSize: "32px", fontWeight: "700", color: "#f8fafc", marginBottom: "20px" }}>
+                  Login<span style={{ color: "var(--color-primary)" }}>_</span>
+                </h2>
+                <div style={{ display: "flex", justifyContent: "center", gap: "12px", marginBottom: "24px" }}>
+                  <div style={{ width: "36px", height: "36px", borderRadius: "50%", border: "1px solid rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", cursor: "pointer" }}>f</div>
+                  <div style={{ width: "36px", height: "36px", borderRadius: "50%", border: "1px solid rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", cursor: "pointer" }}>G</div>
+                  <div style={{ width: "36px", height: "36px", borderRadius: "50%", border: "1px solid rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", cursor: "pointer" }}>in</div>
+                </div>
+                <p style={{ fontSize: "13px", color: "var(--text-muted)" }}>
+                  or use your email account
                 </p>
               </div>
-            </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              <label style={{ fontSize: "12px", fontWeight: "600", color: "var(--text-secondary)", letterSpacing: "0.5px", textTransform: "uppercase" }}>Trader Identity</label>
-              <input
-                id="username-input"
-                type="text"
-                value={tempUsername}
-                onChange={(e) => setTempUsername(e.target.value)}
-                autoFocus
-                autoComplete="off"
+              <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                <input
+                  id="username-input"
+                  type="text"
+                  value={tempUsername}
+                  onChange={(e) => setTempUsername(e.target.value)}
+                  autoFocus
+                  autoComplete="off"
+                  style={{
+                    padding: "16px",
+                    borderRadius: "8px",
+                    border: "none",
+                    backgroundColor: "rgba(0, 0, 0, 0.4)",
+                    color: "#f8fafc",
+                    fontSize: "14px",
+                    outline: "none",
+                    fontFamily: "var(--font-sans)",
+                    width: "100%",
+                  }}
+                  placeholder="Trader Identity (min 3 chars)"
+                  required
+                  minLength={3}
+                />
+                <input
+                  type="password"
+                  style={{
+                    padding: "16px",
+                    borderRadius: "8px",
+                    border: "none",
+                    backgroundColor: "rgba(0, 0, 0, 0.4)",
+                    color: "#f8fafc",
+                    fontSize: "14px",
+                    outline: "none",
+                    fontFamily: "var(--font-sans)",
+                    width: "100%",
+                  }}
+                  placeholder="Password"
+                />
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <span style={{ fontSize: "12px", color: "var(--text-muted)", cursor: "pointer" }}>Forgot your password?</span>
+              </div>
+
+              <button
+                id="launch-platform-btn"
+                type="submit"
+                disabled={isSubmitting || tempUsername.trim().length < 3}
                 style={{
-                  padding: "14px 16px",
-                  borderRadius: "10px",
-                  border: "1px solid rgba(0, 242, 254, 0.2)",
-                  backgroundColor: "rgba(0, 0, 0, 0.4)",
-                  color: "#f8fafc",
-                  fontSize: "15px",
-                  outline: "none",
-                  fontFamily: "var(--font-sans)",
-                  pointerEvents: "all",
-                  cursor: "text",
+                  width: "200px",
+                  margin: "0 auto",
+                  padding: "14px",
+                  fontSize: "14px",
+                  fontWeight: "700",
+                  cursor: "pointer",
+                  backgroundColor: "var(--color-primary)",
+                  color: "#000",
+                  border: "none",
+                  borderRadius: "24px",
+                  marginTop: "10px",
+                  transition: "var(--transition-fast)"
                 }}
-                placeholder="e.g. AlphaTrader99 (min 3 chars)"
-                required
-                minLength={3}
-              />
-            </div>
-
-            <button
-              id="launch-platform-btn"
-              type="submit"
-              className="btn-neon"
-              disabled={isSubmitting || tempUsername.trim().length < 3}
-              style={{ width: "100%", padding: "14px", fontSize: "15px", pointerEvents: "all", cursor: "pointer" }}
-            >
-              {isSubmitting ? "Connecting..." : <>Launch Platform <ArrowRight size={16} /></>}
-            </button>
-
-            <p style={{ fontSize: "11px", color: "var(--text-muted)", textAlign: "center" }}>
-              Simulation only — no real funds are involved
-            </p>
-          </form>
+              >
+                {isSubmitting ? "CONNECTING..." : "SIGN IN"}
+              </button>
+            </form>
+          </div>
         </div>
       )}
     </div>

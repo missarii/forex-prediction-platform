@@ -1,7 +1,7 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useCallback } from "react";
 
 export interface Candlestick {
-  time: number; // timestamp in seconds
+  time: number;
   open: number;
   high: number;
   low: number;
@@ -14,223 +14,262 @@ interface CandlestickChartProps {
   symbol: string;
 }
 
+function getPrecision(symbol: string): number {
+  if (symbol.includes("BTC") || symbol.includes("ETH") || symbol.includes("XAU")) return 2;
+  if (symbol.includes("JPY")) return 3;
+  return 5;
+}
+
 export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   candles,
   currentPrice,
   symbol,
 }) => {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasRef    = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const rafRef       = useRef<number | null>(null);
+  // Store latest logical (CSS) size so the draw routine always uses real dimensions
+  const sizeRef      = useRef({ w: 0, h: 0 });
 
-  // Redraw the chart when candles or currentPrice changes
-  useEffect(() => {
+  // Keep latest props in a ref so the draw callback never goes stale
+  const propsRef = useRef({ candles, currentPrice, symbol });
+  useEffect(() => { propsRef.current = { candles, currentPrice, symbol }; });
+
+  /* ─── Core draw ─────────────────────────────────────────────────── */
+  const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Set high-DPI resolution
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * window.devicePixelRatio;
-    canvas.height = rect.height * window.devicePixelRatio;
-    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    const { candles, currentPrice, symbol } = propsRef.current;
+    const precision = getPrecision(symbol);
+    const W = sizeRef.current.w;
+    const H = sizeRef.current.h;
+    if (W === 0 || H === 0) return;
 
-    const width = rect.width;
-    const height = rect.height;
+    // ── Background ───────────────────────────────────────────────
+    ctx.fillStyle = "#080d1e";
+    ctx.fillRect(0, 0, W, H);
 
-    // Clear canvas
-    ctx.fillStyle = "#0d1127";
-    ctx.fillRect(0, 0, width, height);
-
-    // Draw grid lines
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.04)";
+    // ── Grid ─────────────────────────────────────────────────────
+    ctx.strokeStyle = "rgba(255,255,255,0.04)";
     ctx.lineWidth = 1;
-    const gridCols = 8;
-    const gridRows = 5;
-    for (let i = 1; i < gridCols; i++) {
-      const x = (width / gridCols) * i;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
-      ctx.stroke();
+    for (let i = 1; i < 8; i++) {
+      const x = (W / 8) * i;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
     }
-    for (let i = 1; i < gridRows; i++) {
-      const y = (height / gridRows) * i;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
+    for (let i = 1; i < 6; i++) {
+      const y = (H / 6) * i;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
     }
 
     if (candles.length === 0) {
-      // Draw loading text
-      ctx.fillStyle = "#94a3b8";
-      ctx.font = "14px Outfit";
+      ctx.fillStyle = "#64748b";
+      ctx.font = "13px Outfit, sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText("Waiting for live WebSocket market stream...", width / 2, height / 2);
+      ctx.fillText("Waiting for live market data…", W / 2, H / 2);
       return;
     }
 
-    // Determine min/max values for scaling
-    let maxVal = Math.max(...candles.map((c) => c.high), currentPrice);
-    let minVal = Math.min(...candles.map((c) => c.low), currentPrice);
-    
-    // Add 10% padding on top and bottom
-    const spread = maxVal - minVal;
-    maxVal += spread * 0.1 || currentPrice * 0.001;
-    minVal -= spread * 0.1 || currentPrice * 0.001;
+    // ── Scale ─────────────────────────────────────────────────────
+    const PAD_RIGHT = 80;
+    const chartW = W - PAD_RIGHT;
 
-    const scaleY = (val: number) => {
-      return height - ((val - minVal) / (maxVal - minVal)) * height;
-    };
+    let maxVal = Math.max(...candles.map(c => c.high), currentPrice);
+    let minVal = Math.min(...candles.map(c => c.low),  currentPrice);
+    const spread = maxVal - minVal || currentPrice * 0.001;
+    maxVal += spread * 0.12;
+    minVal -= spread * 0.08;
 
-    const candleWidth = Math.max(3, (width - 60) / Math.max(20, candles.length));
-    const gap = 3;
+    const scaleY = (v: number) => ((maxVal - v) / (maxVal - minVal)) * H;
 
-    // Draw Candlesticks
-    candles.forEach((candle, index) => {
-      const x = index * (candleWidth + gap) + 15;
-      const yOpen = scaleY(candle.open);
-      const yClose = scaleY(candle.close);
-      const yHigh = scaleY(candle.high);
-      const yLow = scaleY(candle.low);
-      const isBull = candle.close >= candle.open;
+    // ── Candles ───────────────────────────────────────────────────
+    const n = Math.max(20, candles.length);
+    const candleW = Math.max(4, (chartW - 20) / n - 2);
+    const gap     = Math.max(1, candleW * 0.25);
 
-      // Candle color
-      const color = isBull ? "#00e676" : "#ff3d00";
+    candles.forEach((c, i) => {
+      const x = 10 + i * (candleW + gap);
+      const yO = scaleY(c.open);
+      const yC = scaleY(c.close);
+      const yH = scaleY(c.high);
+      const yL = scaleY(c.low);
+      const bull  = c.close >= c.open;
+      const color = bull ? "#00e676" : "#ff3d00";
+
       ctx.strokeStyle = color;
-      ctx.fillStyle = color;
-      ctx.lineWidth = 1.5;
-
-      // Draw wick
+      ctx.lineWidth   = 1;
       ctx.beginPath();
-      ctx.moveTo(x + candleWidth / 2, yHigh);
-      ctx.lineTo(x + candleWidth / 2, yLow);
+      ctx.moveTo(x + candleW / 2, yH);
+      ctx.lineTo(x + candleW / 2, yL);
       ctx.stroke();
 
-      // Draw body
-      ctx.beginPath();
-      const bodyHeight = Math.max(1.5, Math.abs(yClose - yOpen));
-      ctx.rect(x, Math.min(yOpen, yClose), candleWidth, bodyHeight);
-      ctx.fill();
+      const bodyTop = Math.min(yO, yC);
+      const bodyH   = Math.max(1.5, Math.abs(yC - yO));
+      ctx.fillStyle = bull ? "rgba(0,230,118,0.85)" : "rgba(255,61,0,0.85)";
+      ctx.fillRect(x, bodyTop, candleW, bodyH);
     });
 
-    // Draw Moving Average Overlay (e.g. 5-period SMA)
+    // ── 5-period SMA ──────────────────────────────────────────────
     if (candles.length >= 5) {
-      ctx.strokeStyle = "#9d4edd";
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(157,78,221,0.7)";
+      ctx.lineWidth   = 1.5;
       ctx.beginPath();
       for (let i = 4; i < candles.length; i++) {
-        let sum = 0;
-        for (let j = 0; j < 5; j++) {
-          sum += candles[i - j].close;
-        }
-        const avg = sum / 5;
-        const x = i * (candleWidth + gap) + 15 + candleWidth / 2;
+        const avg = (candles[i].close + candles[i-1].close + candles[i-2].close +
+                     candles[i-3].close + candles[i-4].close) / 5;
+        const x = 10 + i * (candleW + gap) + candleW / 2;
         const y = scaleY(avg);
-        if (i === 4) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        i === 4 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       }
       ctx.stroke();
     }
 
-    // Draw Current Live Price line
-    const currentY = scaleY(currentPrice);
-    ctx.strokeStyle = "rgba(0, 242, 254, 0.4)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(0, currentY);
-    ctx.lineTo(width - 70, currentY);
-    ctx.stroke();
-    ctx.setLineDash([]); // Reset line dash
+    // ── Y-axis labels ─────────────────────────────────────────────
+    ctx.fillStyle  = "#475569";
+    ctx.font       = "9px JetBrains Mono, monospace";
+    ctx.textAlign  = "left";
+    for (let i = 0; i <= 5; i++) {
+      const val = minVal + ((maxVal - minVal) / 5) * i;
+      const y   = scaleY(val);
+      ctx.fillText(val.toFixed(precision), chartW + 4, y + 3);
+      ctx.strokeStyle = "rgba(255,255,255,0.03)";
+      ctx.lineWidth   = 1;
+      ctx.beginPath(); ctx.moveTo(chartW, y); ctx.lineTo(W, y); ctx.stroke();
+    }
 
-    // Draw Live Price Label on Y-axis
+    // ── Live price dashed line ─────────────────────────────────────
+    const curY = scaleY(currentPrice);
+    ctx.strokeStyle = "rgba(0,242,254,0.5)";
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath(); ctx.moveTo(0, curY); ctx.lineTo(chartW - 2, curY); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Price badge
+    const bW = 72, bX = chartW + 4, bY = curY - 10;
     ctx.fillStyle = "#00f2fe";
-    ctx.fillRect(width - 70, currentY - 10, 65, 20);
-    ctx.fillStyle = "#070913";
-    ctx.font = "bold 10px JetBrains Mono";
-    ctx.textAlign = "center";
-    ctx.fillText(currentPrice.toFixed(symbol.includes("USD") ? 5 : 2), width - 37, currentY + 4);
-
-    // Draw Price Scaling indicators on the far right
-    ctx.fillStyle = "#64748b";
-    ctx.font = "10px JetBrains Mono";
-    ctx.textAlign = "right";
-    ctx.fillText(maxVal.toFixed(symbol.includes("USD") ? 5 : 2), width - 75, 15);
-    ctx.fillText(minVal.toFixed(symbol.includes("USD") ? 5 : 2), width - 75, height - 10);
-  }, [candles, currentPrice, symbol]);
-
-  // Handle container resizing
-  useEffect(() => {
-    const handleResize = () => {
-      const canvas = canvasRef.current;
-      if (!canvas || !containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      canvas.style.width = `${rect.width}px`;
-      canvas.style.height = `${rect.height}px`;
-    };
-
-    window.addEventListener("resize", handleResize);
-    // Initial size
-    setTimeout(handleResize, 100);
-
-    return () => window.removeEventListener("resize", handleResize);
+    ctx.beginPath(); ctx.roundRect(bX, bY, bW, 20, 4); ctx.fill();
+    ctx.fillStyle  = "#060c1a";
+    ctx.font       = "bold 9px JetBrains Mono, monospace";
+    ctx.textAlign  = "center";
+    ctx.fillText(currentPrice.toFixed(precision), bX + bW / 2, bY + 13);
   }, []);
+
+  /* ─── Schedule a single RAF draw ─────────────────────────────────── */
+  const scheduleDraw = useCallback(() => {
+    if (rafRef.current !== null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      draw();
+    });
+  }, [draw]);
+
+  /* ─── Resize: update canvas buffer WITHOUT touching CSS width ─────── */
+  const resizeCanvas = useCallback(() => {
+    const canvas    = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    const dpr  = window.devicePixelRatio || 1;
+    const rect  = container.getBoundingClientRect();
+    const cssW  = Math.floor(rect.width);
+    const cssH  = Math.floor(rect.height);
+    if (cssW === 0 || cssH === 0) return;
+
+    // Only update the pixel buffer when size actually changed
+    if (canvas.width !== cssW * dpr || canvas.height !== cssH * dpr) {
+      // Lock CSS display size FIRST to prevent layout expansion
+      canvas.style.width  = `${cssW}px`;
+      canvas.style.height = `${cssH}px`;
+      // Then set the buffer (this clears the canvas but doesn't change CSS size)
+      canvas.width  = cssW * dpr;
+      canvas.height = cssH * dpr;
+      // Re-apply DPR scale after buffer reset
+      const ctx = canvas.getContext("2d");
+      if (ctx) ctx.scale(dpr, dpr);
+    }
+
+    sizeRef.current = { w: cssW, h: cssH };
+    scheduleDraw();
+  }, [scheduleDraw]);
+
+  // Redraw when props change
+  useEffect(() => { scheduleDraw(); }, [candles, currentPrice, symbol, scheduleDraw]);
+
+  // ResizeObserver — never re-runs, never causes layout loops
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Use a small delay on first mount to ensure layout is ready
+    const initial = setTimeout(() => resizeCanvas(), 50);
+
+    const ro = new ResizeObserver(() => resizeCanvas());
+    ro.observe(container);
+
+    return () => {
+      clearTimeout(initial);
+      ro.disconnect();
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [resizeCanvas]);
 
   return (
     <div
       ref={containerRef}
       style={{
         width: "100%",
-        height: "360px",
+        height: "340px",
         position: "relative",
         borderRadius: "12px",
-        overflow: "hidden",
+        overflow: "hidden",          // critical: clip any canvas overflow
         border: "1px solid rgba(255, 255, 255, 0.05)",
+        background: "#080d1e",
+        flexShrink: 0,
       }}
     >
+      {/* canvas has NO width/height attributes in JSX — those are set by resizeCanvas() */}
       <canvas
         ref={canvasRef}
         style={{
           display: "block",
-          width: "100%",
-          height: "100%",
+          // Do NOT use width/height CSS here — resizeCanvas sets them explicitly
         }}
       />
+
+      {/* Symbol overlay */}
       <div
         style={{
           position: "absolute",
-          top: "12px",
-          left: "16px",
+          top: "10px",
+          left: "14px",
           display: "flex",
           alignItems: "center",
           gap: "8px",
           pointerEvents: "none",
         }}
       >
-        <span
-          style={{
-            color: "#f8fafc",
-            fontWeight: "700",
-            fontSize: "16px",
-            letterSpacing: "0.5px",
-          }}
-        >
+        <span style={{ color: "#f8fafc", fontWeight: "700", fontSize: "14px", letterSpacing: "0.5px" }}>
           {symbol}
         </span>
         <span
           style={{
             backgroundColor: "rgba(0, 242, 254, 0.1)",
             color: "#00f2fe",
-            fontSize: "11px",
-            fontWeight: "600",
+            fontSize: "9px",
+            fontWeight: "700",
             padding: "2px 6px",
             borderRadius: "4px",
             border: "1px solid rgba(0, 242, 254, 0.2)",
+            letterSpacing: "0.5px",
           }}
         >
-          LIVE WEBSOCKET
+          LIVE
         </span>
       </div>
     </div>

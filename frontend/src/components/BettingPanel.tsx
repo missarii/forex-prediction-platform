@@ -136,7 +136,7 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                 padding: "6px 0",
                 borderRadius: "4px",
                 border: "1px solid rgba(255, 255, 255, 0.05)",
-                backgroundColor: "rgba(255,255,255,0.02)",
+                backgroundColor: "rgba(7,9,19,0.3)",
                 color: "var(--text-secondary)",
                 fontSize: "11px",
                 cursor: "pointer",
